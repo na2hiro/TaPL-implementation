@@ -1,3 +1,6 @@
+import Control.Monad.Error
+import Control.Monad
+
 data Term = Tru
           | Fals
           | If Term Term Term
@@ -8,14 +11,32 @@ data Term = Tru
           | Var Index
           | Abs Type Term
           | App Term Term
+          | VUnit
           deriving (Show, Eq)
 
 data Type = Bool
           | Nat
           | Arr Type Type
+          | Unit
           deriving (Show, Eq)
 
+data MyError = TypeMismatch TypeName Type
+             | Default String
+
+type TypeName = String
+
+instance Error MyError where
+    noMsg = Default "An error has occurred"
+    strMsg = Default
+
+showError :: MyError -> String
+showError (Default str) = str
+showError (TypeMismatch expected found) = "Invalid type: expected "++ expected ++ ", found "++show found
+
+instance Show MyError where show = showError
+
 type Context = [Type]
+type ThrowsError = Either MyError
 emptyContext :: Context
 emptyContext = []
 
@@ -63,24 +84,42 @@ termSubst j s (Var k) | k==j = s
 termSubst j s (Abs typ t) = Abs typ$ termSubst (j+1) (termShift 1 s) t
 termSubst j s (App t1 t2) = App (termSubst j s t1) (termSubst j s t2)
 
-typeof :: Context->Term->Maybe Type
-typeof ctx Tru = Just Bool
-typeof ctx Fals = Just Bool
-typeof ctx (If t1 t2 t3) | typet1 == Just Bool && typet2 /= Nothing && typet2 == typet3 = typet2
-  where typet1 = typeof ctx t1
-        typet2 = typeof ctx t2
-        typet3 = typeof ctx t3
-typeof ctx Zero = Just Nat
-typeof ctx (Succ n) | typeof ctx n==Just Nat = Just Nat
-typeof ctx (Pred n) | typeof ctx n==Just Nat = Just Nat
-typeof ctx (IsZero n) | typeof ctx n==Just Nat = Just Bool
-typeof ctx (Var x) = Just (ctx!!x)
-typeof ctx (Abs typevar t) | isJust typeterm = typeterm >>= \t->Just$ Arr typevar t
-  where typeterm = typeof (typevar:ctx) t
-typeof ctx (App t1 t2) | isJust typet1 && isJust typet2 && revealt1 == typet2 = revealt1
-  where typet1 = typeof ctx t1
-        typet2 = typeof ctx t2
-        revealFirst (Just (Arr t _)) = Just t
-        revealFirst _ = Nothing
-        revealt1 = revealFirst typet1
-typeof ctx _ = Nothing
+isRight (Right _)=True
+isRight _=False
+
+typeof :: Context->Term->ThrowsError Type
+typeof ctx Tru = return Bool
+typeof ctx Fals = return Bool
+typeof ctx (If t1 t2 t3) = do
+    typet1 <- typeof ctx t1
+    typet2 <- typeof ctx t2
+    typet3 <- typeof ctx t3
+    case typet1 == Bool of
+      False->throwError$ TypeMismatch (show Bool) typet1
+      True->case typet2 == typet3 of
+        False->throwError$ TypeMismatch (show typet2) typet3
+        True->return typet2
+typeof ctx Zero = return Nat
+typeof ctx (Succ n) = do
+    typet <-typeof ctx n
+    if typet==Nat then return Nat else throwError$ TypeMismatch (show Nat) typet
+typeof ctx (Pred n) = do
+    typet <- typeof ctx n
+    if typet==Nat then return Nat else throwError$ TypeMismatch (show Nat) typet
+typeof ctx (IsZero n) = do
+    typet <- typeof ctx n
+    if typet==Nat then return Bool else throwError$ TypeMismatch (show Nat) typet
+typeof ctx (Var x) = return (ctx!!x)
+typeof ctx (Abs typevar t) = do
+    typet <- typeof (typevar:ctx) t
+    return$ Arr typevar typet
+typeof ctx (App t1 t2) = do
+    typet1 <- typeof ctx t1
+    typet2 <- typeof ctx t2
+    revealt1 <- revealFirst typet1
+    if revealt1 == typet2 then return revealt1 else throwError$ TypeMismatch (show typet2) revealt1
+  where 
+        revealFirst (Arr t _) = return t
+        revealFirst t = throwError$ TypeMismatch "Arrow type" t
+typeof ctx VUnit = return Unit
+typeof ctx _ = throwError$ Default "no pattern matched"
