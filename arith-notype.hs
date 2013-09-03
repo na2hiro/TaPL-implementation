@@ -12,6 +12,8 @@ data Term = Tru
           | Abs Type Term
           | App Term Term
           | VUnit
+          | As Term Type
+          | Let Term Term
           deriving (Show, Eq)
 
 data Type = Bool
@@ -63,7 +65,13 @@ eval1 ctx (App t1 t2) | isJust t1' = t1' >>= \t1'->Just$ App t1' t2
                       | isJust t2' = t2' >>= \t2'->Just$ App t1 t2'
   where t1'=eval1 ctx t1
         t2'=eval1 ctx t2
-eval1 ctx (App (Abs typ x) t2) = Just$ termShift (-1)$ termSubst 0 (termShift 1 t2) x
+eval1 ctx (App (Abs typ x) t2) = Just$ termSubstTop t2 x
+eval1 ctx (As t ty) =case eval1 ctx t of
+                       Just t'->return$ As t' ty
+                       Nothing->return t
+eval1 ctx (Let t1 t2) = case eval1 ctx t1 of
+                          Just t'->return$ Let t' t2
+                          Nothing->return$ termSubstTop t1 t2
 eval1 _ _ = Nothing
 
 eval :: Context->Term->Term
@@ -71,21 +79,27 @@ eval ctx t = case (eval1 ctx t) of
            Just t2->eval ctx t2
            Nothing->t
 
+--ドブラウンシフト
 termShift :: Index->Term->Term
 termShift d t = shift 0 t
   where shift c (Var k) | k<c = Var k
                         | otherwise = Var (k+d)
         shift c (Abs typ t) = Abs typ$ shift (c+1) t
         shift c (App t1 t2) = (App (shift c t1) (shift c t2))
+        shift c (If t1 t2 t3) = (If (shift c t1) (shift c t2) (shift c t3))
+        shift c t = t
 
+--代入
 termSubst :: Index->Term->Term->Term
 termSubst j s (Var k) | k==j = s
                       | otherwise = Var k
 termSubst j s (Abs typ t) = Abs typ$ termSubst (j+1) (termShift 1 s) t
 termSubst j s (App t1 t2) = App (termSubst j s t1) (termSubst j s t2)
+termSubst j s (If t1 t2 t3) = If (termSubst j s t1) (termSubst j s t2) (termSubst j s t3)
+termSubst j s t = t
 
-isRight (Right _)=True
-isRight _=False
+termSubstTop s t = termShift(-1)(termSubst 0 (termShift 1 s) t)
+
 
 typeof :: Context->Term->ThrowsError Type
 typeof ctx Tru = return Bool
@@ -122,4 +136,11 @@ typeof ctx (App t1 t2) = do
         revealFirst (Arr t _) = return t
         revealFirst t = throwError$ TypeMismatch "Arrow type" t
 typeof ctx VUnit = return Unit
+typeof ctx (As t ty) = do
+    tty <- typeof ctx t
+    if tty==ty then return ty else throwError$ TypeMismatch (show ty) tty
+typeof ctx (Let t1 t2) = do
+    typet1 <- typeof ctx t1
+    typet2 <- typeof (typet1:ctx) t2
+    return typet2
 typeof ctx _ = throwError$ Default "no pattern matched"
