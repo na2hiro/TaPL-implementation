@@ -1,5 +1,7 @@
 import Control.Monad.Error
 import Control.Monad
+import Data.Map
+import Data.Traversable as T
 
 data Term = Tru
           | Fals
@@ -14,18 +16,22 @@ data Term = Tru
           | VUnit
           | As Term Type
           | Let Term Term
+          | Rec (Map FieldName Term)
+          | Proj Term FieldName
           deriving (Show, Eq)
 
 data Type = Bool
           | Nat
           | Arr Type Type
           | Unit
+          | Record (Map FieldName Type)
           deriving (Show, Eq)
 
 data MyError = TypeMismatch TypeName Type
              | Default String
 
 type TypeName = String
+type FieldName = String
 
 instance Error MyError where
     noMsg = Default "An error has occurred"
@@ -72,6 +78,7 @@ eval1 ctx (As t ty) =case eval1 ctx t of
 eval1 ctx (Let t1 t2) = case eval1 ctx t1 of
                           Just t'->return$ Let t' t2
                           Nothing->return$ termSubstTop t1 t2
+eval1 ctx (Proj (Rec mp) field) = Data.Map.lookup field$ fmap (eval ctx) mp --一度にevalしている
 eval1 _ _ = Nothing
 
 eval :: Context->Term->Term
@@ -143,4 +150,5 @@ typeof ctx (Let t1 t2) = do
     typet1 <- typeof ctx t1
     typet2 <- typeof (typet1:ctx) t2
     return typet2
+typeof ctx (Rec mp) = liftM Record$ T.mapM (typeof ctx) mp
 typeof ctx _ = throwError$ Default "no pattern matched"
