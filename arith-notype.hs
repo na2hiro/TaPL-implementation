@@ -25,9 +25,11 @@ data Type = Bool
           | Arr Type Type
           | Unit
           | Record (Map FieldName Type)
+          | Top
           deriving (Show, Eq)
 
 data MyError = TypeMismatch TypeName Type
+             | FieldNotFound FieldName
              | Default String
 
 type TypeName = String
@@ -40,6 +42,7 @@ instance Error MyError where
 showError :: MyError -> String
 showError (Default str) = str
 showError (TypeMismatch expected found) = "Invalid type: expected "++ expected ++ ", found "++show found
+showError (FieldNotFound field) = "Field "++field++" not found on record"
 
 instance Show MyError where show = showError
 
@@ -138,7 +141,7 @@ typeof ctx (App t1 t2) = do
     typet1 <- typeof ctx t1
     typet2 <- typeof ctx t2
     revealt1 <- revealFirst typet1
-    if revealt1 == typet2 then return revealt1 else throwError$ TypeMismatch (show typet2) revealt1
+    if typet2 <: revealt1 then return revealt1 else throwError$ TypeMismatch (show typet2) revealt1
   where 
         revealFirst (Arr t _) = return t
         revealFirst t = throwError$ TypeMismatch "Arrow type" t
@@ -151,4 +154,16 @@ typeof ctx (Let t1 t2) = do
     typet2 <- typeof (typet1:ctx) t2
     return typet2
 typeof ctx (Rec mp) = liftM Record$ T.mapM (typeof ctx) mp
+typeof ctx (Proj (Rec mp) field) = case Data.Map.lookup field mp of
+                                     Nothing->throwError$ FieldNotFound field
+                                     Just val->typeof ctx val
+
 typeof ctx _ = throwError$ Default "no pattern matched"
+
+
+(<:) :: Type->Type->Bool
+_ <: Top = True
+x <: y|x==y = True
+(Arr s1 s2) <: (Arr t1 t2) = t1 <: s1 && s2 <: t2
+(Record m1) <: (Record m2) = and$Prelude.map (\(k2,v2)->Data.Map.lookup k2 m1==Just v2)(toList m2)
+_ <: _ = False
