@@ -1,4 +1,5 @@
 import Control.Monad.Error
+import Data.List
 import Data.Map
 import Data.Traversable as T
 
@@ -64,7 +65,7 @@ showTerm (App t1 t2) = "("++show t1++" "++show t2++")"
 showTerm VUnit = "unit"
 showTerm (As term typ) = show term++" as "++show typ
 showTerm (Let t1 t2) = "let "++show t1++" in "++show t2
-showTerm (Rec mp) = show mp
+showTerm (Rec mp) = "{"++intercalate "," (Prelude.map (\(k,v)->k++"="++show v)$ toList mp)++"}"
 showTerm (Proj t name) = show t++"."++name
 showTerm (Fold typ term) = "fold ["++show typ++"] "++show term
 showTerm (Unfold typ term) = "unfold ["++show typ++"] "++show term
@@ -76,7 +77,7 @@ showType Bool = "Bool"
 showType Nat = "Nat"
 showType (Arr t1 t2) = "("++show t1++" -> "++show t2++")"
 showType Unit = "Unit"
-showType (Record mp) = show mp
+showType (Record mp) = "{"++intercalate "," (Prelude.map (\(k,v)->k++":"++show v)$ toList mp)++"}"
 showType Top = "Top"
 showType (TVar name) = name
 showType (Mu name typ) = "Mu "++name++"."++show typ
@@ -99,6 +100,14 @@ replaceTVar ty x (Arr t1 t2) = Arr (replaceTVar ty x t1) (replaceTVar ty x t2)
 replaceTVar ty x (Record mp) = Record$ fmap (replaceTVar ty x) mp
 replaceTVar ty x (TVar ty2) | ty==ty2 = x
 replaceTVar _ _ t = t
+
+replace::Type->Type->Type->Type
+replace from to val | val==from = to
+replace from to (Arr t1 t2) = Arr (replace from to t1) (replace from to t2)
+replace from to (Record mp) = Record$ fmap (replace from to) mp
+replace (TVar varname) to mu@(Mu varname2 body) | varname==varname2 = mu
+replace from to (Mu varname body) = Mu varname (replace from to body)
+replace _ _ body = body 
 
 eval1 :: Context->Term->Maybe Term
 eval1 ctx (If Tru t _) = Just t
@@ -202,12 +211,20 @@ typeof ctx (Rec mp) = liftM Record$ T.mapM (typeof ctx) mp
 typeof ctx (Proj (Rec mp) field) = case Data.Map.lookup field mp of
                                      Nothing->throwError$ FieldNotFound field
                                      Just val->typeof ctx val
-typeof ctx (Fold mu@(Mu x type1) t) = do
+{-typeof ctx (Fold mu@(Mu x type1) t) = do
     typet <- typeof ctx t
-    if typet == replaceTVar x mu type1 then return mu else throwError$ TypeMismatch "uhyohyo" mu
+    if typet == replaceTVar x mu type1 then return mu else throwError$ TypeMismatch "folding" mu
+    -}
+typeof ctx (Fold mu@(Mu x t) term) = do
+    typet <- typeof ctx term
+    return$ Main.fold mu typet 
+typeof ctx (Unfold mu@(Mu x t) term) = do
+    typet <- typeof ctx term
+    return$ unfold mu typet 
+--    if typet == unfold mu typet then return mu else throwError$ TypeMismatch "uhyohyo" mu
+
 
 typeof ctx _ = throwError$ Default "no pattern matched"
-
 
 (<:) :: Type->Type->Bool
 _ <: Top = True
@@ -216,14 +233,28 @@ x <: y|x==y = True
 (Record m1) <: (Record m2) = and$Prelude.map (\(k2,v2)->Data.Map.lookup k2 m1==Just v2)(toList m2)
 _ <: _ = False
 
+fold::Type->Type->Type
+fold mu@(Mu varname typ) body = Mu varname $replace mu (TVar varname) body
+unfold::Type->Type->Type
+unfold mu@(Mu varname typ) (Mu varname2 body) = replace (TVar varname) mu body
 
-fixN = (Abs (Arr (TVar "T") (TVar "T"))
-            (App (Abs (Mu "A" (Arr (TVar "A") (TVar "T")))
-                      (Var 1 `App` Var 0 `App` Var 0))
-                 (Abs (Mu "A" (Arr (TVar "A") (TVar "T")))
-                      (Var 1 `App` Var 0 `App` Var 0))))
+fixN typ = (Abs (Arr typ typ)
+            (App (Abs (Mu "A" (Arr (TVar "A") typ))
+                      (Var 1 `App` (Unfold (Mu "A" (Arr (TVar "A") typ)) (Var 0) `App` Var 0)))
+                 (Fold (Mu "A" (Arr (TVar "A") typ))
+                       (Abs (Mu "A" (Arr (TVar "A") typ))
+                            (Var 1 `App` (Unfold (Mu "A" (Arr (TVar "A") typ)) (Var 0) `App` Var 0))))))
 fixV = (Abs (Arr (TVar "T") (TVar "T"))
             (App (Abs (Mu "A" (Arr (TVar "A") (TVar "T")))
-                      (Var 1 `App` Abs (Mu "A" (TVar "A")) (Var 1 `App` Var 1 `App` Var 0)))
-                 (Abs (Mu "A" (Arr (TVar "A") (TVar "T")))
-                      (App (Var 1) (Abs (Mu "A" (TVar "A")) (Var 1 `App` Var 1 `App` Var 0))))))
+                      (Var 1 `App` Abs (Mu "A" (TVar "A")) (Var 1 `App` Unfold (Mu "A" (Arr (TVar "A") (TVar "T"))) (Var 1) `App` Var 0)))
+                 (Fold (Mu "A" (Arr (TVar "A") (TVar "T")))
+                       (Abs (Mu "A" (Arr (TVar "A") (TVar "T")))
+                            (Var 1 `App` (Abs (Mu "A" (TVar "A")) (Var 1 `App` Unfold (Mu "A" (Arr (TVar "A") (TVar "T"))) (Var 1) `App` Var 0)))))))
+
+hungryt = Mu "A" (Arr Nat (TVar "A"))
+--hungryf = Abs (Arr Nat (Mu "A" (Arr Nat (TVar "A")))) (Abs Nat (Fold (Mu "A" (Arr Nat (TVar "A"))) (Abs Nat (Fold (Mu "A" (Arr Nat (TVar "A"))) (Var 2)))))
+--hungryf = Abs (Arr Nat (Mu "A" (Arr Nat (TVar "A")))) (Fold (Mu "A" (Arr Nat (TVar "A"))) (Abs Nat (Fold (Mu "A" (Arr Nat (TVar "A"))) (Abs Nat (Fold (Mu "A" (Arr Nat (TVar "A"))) (Var 2))))))
+hungryf = (Abs (Arr Nat hungryt)
+               (Abs Nat (Fold hungryt (Var 1))))
+
+hungry = fixN (Arr Nat hungryt) `App` hungryf
