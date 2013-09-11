@@ -40,10 +40,8 @@ data Type = Bool
           deriving (Eq)
 
 data MyError = TypeMismatch TypeName Type
-             | FieldNotFound FieldName Term
-             | FieldTypeNotFound FieldName Term
-             | LabelNotFound Label Term
-             | LabelTypeNotFound Label Type
+             | FieldNotFound FieldName Type
+             | LabelNotFound Label Type
              | Default String
 
 type TypeName = String
@@ -58,10 +56,8 @@ instance Error MyError where
 showError :: MyError -> String
 showError (Default str) = str
 showError (TypeMismatch expected found) = "Invalid type: expected "++ expected ++ ", found "++show found
-showError (FieldNotFound field record) = "Field '"++field++"' not found on record "++show record
-showError (FieldTypeNotFound field record) = "Field '"++field++"' not found on record type "++show record
-showError (LabelNotFound label variant) = "Label '"++label++"' not found on variant "++show variant
-showError (LabelTypeNotFound label variant) = "Label '"++label++"' not found on variant type "++show variant
+showError (FieldNotFound field record) = "Field '"++field++"' not found on record typed "++show record
+showError (LabelNotFound label variant) = "Label '"++label++"' not found on variant typed "++show variant
 
 showTerm :: Term -> String
 showTerm Tru = "true"
@@ -234,18 +230,18 @@ typeof ctx (Let t1 t2) = do
     return typet2
 typeof ctx (Rec mp) = liftM Record$ T.mapM (typeof ctx) mp
 typeof ctx (Proj r field) = case typeof ctx r of
-                              Right (Record mp)->case Data.Map.lookup field mp of
-                                                   Nothing->throwError$ FieldNotFound field r
+                              Right rc@(Record mp)->case Data.Map.lookup field mp of
+                                                   Nothing->throwError$ FieldNotFound field rc
                                                    Just typ->return typ
                               otherwise -> throwError$ Default$ "projecting non-record term: "++show r
 typeof ctx (Case t0 mp) = do
     (Variant t0type)<- typeof ctx t0
     (T.mapM (\(label, term)->case Data.Map.lookup label t0type of
-                                        Nothing->throwError$ LabelTypeNotFound label (Variant t0type)
+                                        Nothing->throwError$ LabelNotFound label (Variant t0type)
                                         Just ty->typeof (ty:ctx) term
                           )$ toList mp) >>= (\xs->maybe (return (xs!!0)) (throwError)$ getFirst$ foldMap First$ zipWith (\a b->if a==b then Nothing else Just(TypeMismatch (show a) b)) xs (tail xs))
 typeof ctx (As vari@(Vari label term) ty@(Variant mp)) = case Data.Map.lookup label mp of
-                                                        Nothing->throwError$ LabelTypeNotFound label ty
+                                                        Nothing->throwError$ LabelNotFound label ty
                                                         Just typ->typeof ctx term>>=(\x->if x==typ then return ty else throwError$ TypeMismatch (show typ) x)
 typeof ctx (As t ty) = do
     tty <- typeof ctx t
