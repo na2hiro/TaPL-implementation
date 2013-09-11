@@ -40,8 +40,10 @@ data Type = Bool
           deriving (Eq)
 
 data MyError = TypeMismatch TypeName Type
-             | FieldNotFound FieldName
-             | LabelNotFound Label
+             | FieldNotFound FieldName Term
+             | FieldTypeNotFound FieldName Term
+             | LabelNotFound Label Term
+             | LabelTypeNotFound Label Type
              | Default String
 
 type TypeName = String
@@ -56,8 +58,10 @@ instance Error MyError where
 showError :: MyError -> String
 showError (Default str) = str
 showError (TypeMismatch expected found) = "Invalid type: expected "++ expected ++ ", found "++show found
-showError (FieldNotFound field) = "Field "++field++" not found on record"
-showError (LabelNotFound field) = "Label "++field++" not found on variant"
+showError (FieldNotFound field record) = "Field '"++field++"' not found on record "++show record
+showError (FieldTypeNotFound field record) = "Field '"++field++"' not found on record type "++show record
+showError (LabelNotFound label variant) = "Label '"++label++"' not found on variant "++show variant
+showError (LabelTypeNotFound label variant) = "Label '"++label++"' not found on variant type "++show variant
 
 showTerm :: Term -> String
 showTerm Tru = "true"
@@ -106,16 +110,11 @@ type Index = Int
 isJust (Just _) = True
 isJust Nothing = False
 
-replaceTVar::TypeName->Type->Type->Type
-replaceTVar ty x (Arr t1 t2) = Arr (replaceTVar ty x t1) (replaceTVar ty x t2)
-replaceTVar ty x (Record mp) = Record$ fmap (replaceTVar ty x) mp
-replaceTVar ty x (TVar ty2) | ty==ty2 = x
-replaceTVar _ _ t = t
-
 replace::Type->Type->Type->Type
 replace from to val | val==from = to
 replace from to (Arr t1 t2) = Arr (replace from to t1) (replace from to t2)
 replace from to (Record mp) = Record$ fmap (replace from to) mp
+replace from to (Variant mp) = Variant$ fmap (replace from to) mp
 replace (TVar varname) to mu@(Mu varname2 body) | varname==varname2 = mu
 replace from to (Mu varname body) = Mu varname (replace from to body)
 replace _ _ body = body 
@@ -234,17 +233,19 @@ typeof ctx (Let t1 t2) = do
     typet2 <- typeof (typet1:ctx) t2
     return typet2
 typeof ctx (Rec mp) = liftM Record$ T.mapM (typeof ctx) mp
-typeof ctx (Proj (Rec mp) field) = case Data.Map.lookup field mp of
-                                     Nothing->throwError$ FieldNotFound field
-                                     Just val->typeof ctx val
+typeof ctx (Proj r field) = case typeof ctx r of
+                              Right (Record mp)->case Data.Map.lookup field mp of
+                                                   Nothing->throwError$ FieldNotFound field r
+                                                   Just typ->return typ
+                              otherwise -> throwError$ Default$ "projecting non-record term: "++show r
 typeof ctx (Case t0 mp) = do
     (Variant t0type)<- typeof ctx t0
     (T.mapM (\(label, term)->case Data.Map.lookup label t0type of
-                                        Nothing->throwError$ LabelNotFound label
+                                        Nothing->throwError$ LabelTypeNotFound label (Variant t0type)
                                         Just ty->typeof (ty:ctx) term
                           )$ toList mp) >>= (\xs->maybe (return (xs!!0)) (throwError)$ getFirst$ foldMap First$ zipWith (\a b->if a==b then Nothing else Just(TypeMismatch (show a) b)) xs (tail xs))
 typeof ctx (As vari@(Vari label term) ty@(Variant mp)) = case Data.Map.lookup label mp of
-                                                        Nothing->throwError$ FieldNotFound label
+                                                        Nothing->throwError$ LabelTypeNotFound label ty
                                                         Just typ->typeof ctx term>>=(\x->if x==typ then return ty else throwError$ TypeMismatch (show typ) x)
 typeof ctx (As t ty) = do
     tty <- typeof ctx t
@@ -262,7 +263,7 @@ typeof ctx (Unfold mu@(Mu x t) term) = do
 --    if typet == unfold mu typet then return mu else throwError$ TypeMismatch "uhyohyo" mu
 
 
-typeof ctx _ = throwError$ Default "no pattern matched"
+typeof ctx term = throwError$ Default$ "no pattern matched: "++show term
 
 (<:) :: Type->Type->Bool
 _ <: Top = True
@@ -290,12 +291,18 @@ fixV = (Abs (Arr (TVar "T") (TVar "T"))
                             (Var 1 `App` (Abs (Mu "A" (TVar "A")) (Var 1 `App` Unfold (Mu "A" (Arr (TVar "A") (TVar "T"))) (Var 1) `App` Var 0)))))))
 
 hungryt = Mu "A" (Arr Nat (TVar "A"))
---hungryf = Abs (Arr Nat (Mu "A" (Arr Nat (TVar "A")))) (Abs Nat (Fold (Mu "A" (Arr Nat (TVar "A"))) (Abs Nat (Fold (Mu "A" (Arr Nat (TVar "A"))) (Var 2)))))
---hungryf = Abs (Arr Nat (Mu "A" (Arr Nat (TVar "A")))) (Fold (Mu "A" (Arr Nat (TVar "A"))) (Abs Nat (Fold (Mu "A" (Arr Nat (TVar "A"))) (Abs Nat (Fold (Mu "A" (Arr Nat (TVar "A"))) (Var 2))))))
 hungryf = (Abs (Arr Nat hungryt)
                (Abs Nat (Fold hungryt (Var 1))))
 
 hungry = fixN (Arr Nat hungryt) `App` hungryf
 
-inc=(Abs (Variant$ Data.Map.insert "just" Nat$ Data.Map.insert "nothing" TUnit empty) (Case (Var 0) $Data.Map.insert "just" (Succ (Var 0))$ Data.Map.insert "nothing" Zero empty))
-just1 = Vari "just" (Succ Zero) `As` Variant (Data.Map.insert "just" Nat$ Data.Map.insert "nothing" TUnit empty)
+natList = Mu "X"$ Variant$ insert "nil" TUnit$ insert "cons" (Record$ insert "hd" Nat$ insert "tl" (TVar "X") empty) empty
+nlBody = Variant$ insert "nil" TUnit$ insert "cons" (Record$ insert "hd" Nat$ insert "tl" natList empty) empty
+nil = Fold natList (Vari "nil" Unit `As` nlBody)
+cons = (Abs Nat (Abs natList (Fold natList (Vari "cons" (Rec$ insert "hd" (Var 1)$ insert "tl" (Var 0) empty) `As` nlBody))))
+isnil = Abs natList (Case (Unfold natList (Var 0)) (insert "nil" Tru$ insert "cons" Fals empty))
+hd = Abs natList$ Case (Unfold natList (Var 0))$ insert "nil" Zero$ insert "cons" (Proj (Var 0) "hd") empty
+tl = Abs natList$ Case (Unfold natList (Var 0))$ insert "nil" (Var 1)$ insert "cons" (Proj (Var 0) "tl") empty
+
+inc=(Abs (Variant$ insert "just" Nat$ insert "nothing" TUnit empty) (Case (Var 0) $insert "just" (Succ (Var 0))$ insert "nothing" Zero empty))
+just1 = Vari "just" (Succ Zero) `As` Variant (insert "just" Nat$ insert "nothing" TUnit empty)
