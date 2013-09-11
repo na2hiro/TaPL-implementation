@@ -1,7 +1,9 @@
 import Control.Monad.Error
-import Data.List
+import Data.List(intercalate)
 import Data.Map
 import Data.Traversable as T
+import Data.Monoid
+import Data.Foldable(foldMap)
 
 main=putStrLn "hello"
 
@@ -15,10 +17,12 @@ data Term = Tru
           | Var Index
           | Abs Type Term
           | App Term Term
-          | VUnit
+          | Unit
           | As Term Type
           | Let Term Term
           | Rec (Map FieldName Term)
+          | Vari Label Term
+          | Case Term (Map Label Term)
           | Proj Term FieldName
           | Fold Type Term
           | Unfold Type Term
@@ -27,8 +31,9 @@ data Term = Tru
 data Type = Bool
           | Nat
           | Arr Type Type
-          | Unit
+          | TUnit
           | Record (Map FieldName Type)
+          | Variant (Map Label Type)
           | Top
           | TVar TypeVarName
           | Mu TypeVarName Type
@@ -36,11 +41,13 @@ data Type = Bool
 
 data MyError = TypeMismatch TypeName Type
              | FieldNotFound FieldName
+             | LabelNotFound Label
              | Default String
 
 type TypeName = String
 type FieldName = String
 type TypeVarName = String
+type Label = String
 
 instance Error MyError where
     noMsg = Default "An error has occurred"
@@ -50,6 +57,7 @@ showError :: MyError -> String
 showError (Default str) = str
 showError (TypeMismatch expected found) = "Invalid type: expected "++ expected ++ ", found "++show found
 showError (FieldNotFound field) = "Field "++field++" not found on record"
+showError (LabelNotFound field) = "Label "++field++" not found on variant"
 
 showTerm :: Term -> String
 showTerm Tru = "true"
@@ -62,11 +70,13 @@ showTerm (IsZero t) = "iszero "++show t
 showTerm (Var i) = show i
 showTerm (Abs typ term) = "(\\:"++show typ++"."++show term++")"
 showTerm (App t1 t2) = "("++show t1++" "++show t2++")"
-showTerm VUnit = "unit"
+showTerm Unit = "unit"
 showTerm (As term typ) = show term++" as "++show typ
 showTerm (Let t1 t2) = "let "++show t1++" in "++show t2
 showTerm (Rec mp) = "{"++intercalate "," (Prelude.map (\(k,v)->k++"="++show v)$ toList mp)++"}"
 showTerm (Proj t name) = show t++"."++name
+showTerm (Vari label term) = "<"++label++"="++show term++">"
+showTerm (Case term mp) = "case "++showTerm term++" of "++(intercalate " | "$ Prelude.map (\(label,t)->label++"=>"++show t)$ toList mp)
 showTerm (Fold typ term) = "fold ["++show typ++"] "++show term
 showTerm (Unfold typ term) = "unfold ["++show typ++"] "++show term
 
@@ -76,8 +86,9 @@ showType :: Type->String
 showType Bool = "Bool"
 showType Nat = "Nat"
 showType (Arr t1 t2) = "("++show t1++" -> "++show t2++")"
-showType Unit = "Unit"
+showType TUnit = "Unit"
 showType (Record mp) = "{"++intercalate "," (Prelude.map (\(k,v)->k++":"++show v)$ toList mp)++"}"
+showType (Variant mp) = "<"++intercalate "," (Prelude.map (\(k,v)->k++":"++show v)$ toList mp)++">"
 showType Top = "Top"
 showType (TVar name) = name
 showType (Mu name typ) = "Mu "++name++"."++show typ
@@ -129,9 +140,15 @@ eval1 ctx (App t1 t2) | isJust t1' = t1' >>= \t1'->Just$ App t1' t2
   where t1'=eval1 ctx t1
         t2'=eval1 ctx t2
 eval1 ctx (App (Abs typ x) t2) = Just$ termSubstTop t2 x
-eval1 ctx (As t ty) = maybe (return t) (\t'->return$ As t' ty)$ eval1 ctx t
+eval1 ctx (As t ty) = case t of
+                        Vari label term -> eval1 ctx term >>= (\term'->return$As (Vari label term') ty)
+                        otherwise -> maybe (return t) (\t'->return$ As t' ty)$ eval1 ctx t
 eval1 ctx (Let t1 t2) = return$ maybe (termSubstTop t1 t2) (\t1'->Let t1' t2)$ eval1 ctx t1
 eval1 ctx (Proj (Rec mp) field) = Data.Map.lookup field$ fmap (eval ctx) mp --一度にevalしている
+eval1 ctx (Vari label term) = liftM (Vari label)$ eval1 ctx term
+eval1 ctx (Case (As (Vari label term) typ) mp) | term'==Nothing = Data.Map.lookup label mp>>=(\t->return$termSubstTop term t)
+  where term' = eval1 ctx term
+eval1 ctx (Case term mp) = eval1 ctx term>>=(\term'->return$ Case term' mp)
 eval1 ctx (Unfold type1 (Fold type2 v)) | v'==Nothing = return v
   where v' = eval1 ctx v
 eval1 ctx (Fold typ t) = eval1 ctx t >>= return. Fold typ
@@ -155,13 +172,25 @@ termShift d t = shift 0 t
 
 --代入
 termSubst :: Index->Term->Term->Term
+termSubst j s (If t1 t2 t3) = If (termSubst j s t1) (termSubst j s t2) (termSubst j s t3)
+termSubst j s (Succ t) = Succ (termSubst j s t)
+termSubst j s (Pred t) = Pred (termSubst j s t)
+termSubst j s (IsZero t) = IsZero (termSubst j s t)
 termSubst j s (Var k) | k==j = s
                       | otherwise = Var k
 termSubst j s (Abs typ t) = Abs typ$ termSubst (j+1) (termShift 1 s) t
 termSubst j s (App t1 t2) = App (termSubst j s t1) (termSubst j s t2)
-termSubst j s (If t1 t2 t3) = If (termSubst j s t1) (termSubst j s t2) (termSubst j s t3)
+termSubst j s (As t typ) = As (termSubst j s t) typ
+termSubst j s (Let term t) = Let (termSubst j s term)$ termSubst (j+1) (termShift 1 s) t
+termSubst j s (Rec mp) = Rec$ fmap (termSubst j s) mp
+termSubst j s (Vari l t) = Vari l (termSubst j s t)
+termSubst j s (Case typ mp) = Case (termSubst j s typ)$ fmap (termSubst (j+1) (termShift 1 s)) mp
+termSubst j s (Proj t field) = Proj (termSubst j s t) field
+termSubst j s (Fold typ t) = Fold typ (termSubst j s t)
+termSubst j s (Unfold typ t) = Unfold typ (termSubst j s t)
 termSubst j s t = t
 
+--sをtに代入
 termSubstTop s t = termShift(-1)(termSubst 0 (termShift 1 s) t)
 
 
@@ -199,10 +228,7 @@ typeof ctx (App t1 t2) = do
   where 
         reveal (Arr t1 t2) = return (t1, t2)
         reveal t = throwError$ TypeMismatch "Arrow type" t
-typeof ctx VUnit = return Unit
-typeof ctx (As t ty) = do
-    tty <- typeof ctx t
-    if tty==ty then return ty else throwError$ TypeMismatch (show ty) tty
+typeof ctx Unit = return TUnit
 typeof ctx (Let t1 t2) = do
     typet1 <- typeof ctx t1
     typet2 <- typeof (typet1:ctx) t2
@@ -211,6 +237,18 @@ typeof ctx (Rec mp) = liftM Record$ T.mapM (typeof ctx) mp
 typeof ctx (Proj (Rec mp) field) = case Data.Map.lookup field mp of
                                      Nothing->throwError$ FieldNotFound field
                                      Just val->typeof ctx val
+typeof ctx (Case t0 mp) = do
+    (Variant t0type)<- typeof ctx t0
+    (T.mapM (\(label, term)->case Data.Map.lookup label t0type of
+                                        Nothing->throwError$ LabelNotFound label
+                                        Just ty->typeof (ty:ctx) term
+                          )$ toList mp) >>= (\xs->maybe (return (xs!!0)) (throwError)$ getFirst$ foldMap First$ zipWith (\a b->if a==b then Nothing else Just(TypeMismatch (show a) b)) xs (tail xs))
+typeof ctx (As vari@(Vari label term) ty@(Variant mp)) = case Data.Map.lookup label mp of
+                                                        Nothing->throwError$ FieldNotFound label
+                                                        Just typ->typeof ctx term>>=(\x->if x==typ then return ty else throwError$ TypeMismatch (show typ) x)
+typeof ctx (As t ty) = do
+    tty <- typeof ctx t
+    if tty==ty then return ty else throwError$ TypeMismatch (show ty) tty
 {-typeof ctx (Fold mu@(Mu x type1) t) = do
     typet <- typeof ctx t
     if typet == replaceTVar x mu type1 then return mu else throwError$ TypeMismatch "folding" mu
@@ -258,3 +296,6 @@ hungryf = (Abs (Arr Nat hungryt)
                (Abs Nat (Fold hungryt (Var 1))))
 
 hungry = fixN (Arr Nat hungryt) `App` hungryf
+
+inc=(Abs (Variant$ Data.Map.insert "just" Nat$ Data.Map.insert "nothing" TUnit empty) (Case (Var 0) $Data.Map.insert "just" (Succ (Var 0))$ Data.Map.insert "nothing" Zero empty))
+just1 = Vari "just" (Succ Zero) `As` Variant (Data.Map.insert "just" Nat$ Data.Map.insert "nothing" TUnit empty)
