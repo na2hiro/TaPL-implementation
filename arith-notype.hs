@@ -116,38 +116,46 @@ replace from to (Mu varname body) = Mu varname (replace from to body)
 replace _ _ body = body 
 
 eval1 :: Context->Term->Maybe Term
-eval1 ctx (If Tru t _) = Just t
-eval1 ctx (If Fals _ t) = Just t
+eval1 ctx (If Tru t _) = Just t -- E-IfTrue 3-1
+eval1 ctx (If Fals _ t) = Just t -- E-IfFalse 3-1
 {-
 eval1 (If t b c) | isJust new = new >>= (\newt->Just$ If newt b c)
   where new = eval1 t
 -}
-eval1 ctx (If t b c) = eval1 ctx t >>= (\newt->Just$ If newt b c)
-eval1 ctx (Succ t) = eval1 ctx t >>= Just. Succ
-eval1 ctx (Pred Zero) = Just Zero
-eval1 ctx (Pred (Succ n)) = Just n
-eval1 ctx (Pred t) = eval1 ctx t >>= Just. Pred
-eval1 ctx (IsZero Zero) = Just Tru
-eval1 ctx (IsZero (Succ n)) = Just Fals
-eval1 ctx (IsZero t) = eval1 ctx t >>= Just. IsZero
-eval1 ctx (App t1 t2) | isJust t1' = t1' >>= \t1'->Just$ App t1' t2
-                      | isJust t2' = t2' >>= \t2'->Just$ App t1 t2'
+eval1 ctx (If t b c) = eval1 ctx t >>= (\newt->Just$ If newt b c) -- E-If 3-1
+eval1 ctx (Succ t) = eval1 ctx t >>= Just. Succ -- E-Succ 3-2
+eval1 ctx (Pred Zero) = Just Zero -- E-PredZero 3-2
+eval1 ctx (Pred (Succ n)) = Just n -- E-PredSucc 3-2
+eval1 ctx (Pred t) = eval1 ctx t >>= Just. Pred -- E-Pred 3-2
+eval1 ctx (IsZero Zero) = Just Tru -- E-IsZeroZero 3-2
+eval1 ctx (IsZero (Succ n)) = Just Fals -- E-IsZeroSucc 3-2
+eval1 ctx (IsZero t) = eval1 ctx t >>= Just. IsZero -- E-IsZero 3-2
+eval1 ctx (App t1 t2) | isJust t1' = t1' >>= \t1'->Just$ App t1' t2 -- E-App1 5-3
+                      | isJust t2' = t2' >>= \t2'->Just$ App t1 t2' -- E-App2 5-3
   where t1'=eval1 ctx t1
         t2'=eval1 ctx t2
-eval1 ctx (App (Abs typ x) t2) = Just$ termSubstTop t2 x
+eval1 ctx (App (Abs typ x) t2) = Just$ termSubstTop t2 x -- E-AppAbs 5-3
 eval1 ctx (As t ty) = case t of
                         Vari label term -> eval1 ctx term >>= (\term'->return$As (Vari label term') ty)
-                        otherwise -> maybe (return t) (\t'->return$ As t' ty)$ eval1 ctx t
-eval1 ctx (Let t1 t2) = return$ maybe (termSubstTop t1 t2) (\t1'->Let t1' t2)$ eval1 ctx t1
-eval1 ctx (Proj (Rec mp) field) = Data.Map.lookup field$ fmap (eval ctx) mp --一度にevalしている
-eval1 ctx (Vari label term) = liftM (Vari label)$ eval1 ctx term
-eval1 ctx (Case (As (Vari label term) typ) mp) | term'==Nothing = Data.Map.lookup label mp>>=(\t->return$termSubstTop term t)
+                        otherwise -> maybe (return t) (\t'->return$ As t' ty)$ eval1 ctx t -- E-Ascribe 11-3
+eval1 ctx (Let t1 t2) = return$ maybe (termSubstTop t1 t2) (\t1'->Let t1' t2)$ eval1 ctx t1 -- E-LetV, E-Let 11-4
+eval1 ctx (Proj term field) = case eval1 ctx term of
+                                Just t'->Just$ Proj t' field -- E-Proj 11-7
+                                Nothing->case term of
+                                           Rec mp->Data.Map.lookup field mp -- E-ProjRcd 11-7
+                                           otherwise->Nothing
+eval1 ctx (Rec mp) = if b then return$ Rec$ fromList$ reverse xs else Nothing -- E-Rcd 11-7
+  where step xs = Prelude.foldl f (False,[]) xs
+        f (b,xs) x@(k,v) = if b then (b,x:xs) else maybe (b,x:xs) (\v'->(True,(k,v'):xs)) (eval1 ctx v)
+        (b,xs) = step$ toList mp
+eval1 ctx (Vari label term) = liftM (Vari label)$ eval1 ctx term -- E-Variant 11-11
+eval1 ctx (Case (As (Vari label term) typ) mp) | term'==Nothing = Data.Map.lookup label mp>>=(\t->return$termSubstTop term t) -- E-CaseVariant 11-11
   where term' = eval1 ctx term
-eval1 ctx (Case term mp) = eval1 ctx term>>=(\term'->return$ Case term' mp)
-eval1 ctx (Unfold type1 (Fold type2 v)) | v'==Nothing = return v
+eval1 ctx (Case term mp) = eval1 ctx term>>=(\term'->return$ Case term' mp) -- E-Case 11-11
+eval1 ctx (Unfold type1 (Fold type2 v)) | v'==Nothing = return v -- E-UnfoldFold 20-1
   where v' = eval1 ctx v
-eval1 ctx (Fold typ t) = eval1 ctx t >>= return. Fold typ
-eval1 ctx (Unfold typ t) = eval1 ctx t >>= return. Unfold typ
+eval1 ctx (Fold typ t) = eval1 ctx t >>= return. Fold typ -- E-Fold 20-1
+eval1 ctx (Unfold typ t) = eval1 ctx t >>= return. Unfold typ -- E-Unfold 20-1
 eval1 _ _ = Nothing
 
 eval :: Context->Term->Term
@@ -190,9 +198,9 @@ termSubstTop s t = termShift(-1)(termSubst 0 (termShift 1 s) t)
 
 
 typeof :: Context->Term->ThrowsError Type
-typeof ctx Tru = return Bool
-typeof ctx Fals = return Bool
-typeof ctx (If t1 t2 t3) = do
+typeof ctx Tru = return Bool -- T-True 8-1
+typeof ctx Fals = return Bool -- T-False 8-1
+typeof ctx (If t1 t2 t3) = do -- T-If 8-1
     typet1 <- typeof ctx t1
     typet2 <- typeof ctx t2
     typet3 <- typeof ctx t3
@@ -201,21 +209,21 @@ typeof ctx (If t1 t2 t3) = do
       True->case typet2 == typet3 of
         False->throwError$ TypeMismatch (show typet2) typet3
         True->return typet2
-typeof ctx Zero = return Nat
-typeof ctx (Succ n) = do
+typeof ctx Zero = return Nat -- T-Zero 8-2
+typeof ctx (Succ n) = do -- T-Succ 8-2
     typet <-typeof ctx n
     if typet==Nat then return Nat else throwError$ TypeMismatch (show Nat) typet
-typeof ctx (Pred n) = do
+typeof ctx (Pred n) = do -- T-Pred 8-2
     typet <- typeof ctx n
     if typet==Nat then return Nat else throwError$ TypeMismatch (show Nat) typet
-typeof ctx (IsZero n) = do
+typeof ctx (IsZero n) = do -- T-IsZero 8-2
     typet <- typeof ctx n
     if typet==Nat then return Bool else throwError$ TypeMismatch (show Nat) typet
-typeof ctx (Var x) = return (ctx!!x)
-typeof ctx (Abs typevar t) = do
+typeof ctx (Var x) = return (ctx!!x) -- T-Var 9-1
+typeof ctx (Abs typevar t) = do -- T-Abs 9-1
     typet <- typeof (typevar:ctx) t
     return$ Arr typevar typet
-typeof ctx (App t1 t2) = do
+typeof ctx (App t1 t2) = do -- T-App 9-1
     typet1 <- typeof ctx t1
     typet2 <- typeof ctx t2
     (headt1, bodyt1) <- reveal typet1
@@ -223,37 +231,37 @@ typeof ctx (App t1 t2) = do
   where 
         reveal (Arr t1 t2) = return (t1, t2)
         reveal t = throwError$ TypeMismatch "Arrow type" t
-typeof ctx Unit = return TUnit
-typeof ctx (Let t1 t2) = do
+typeof ctx Unit = return TUnit -- T-Unit 11-2
+typeof ctx (Let t1 t2) = do -- T-Let 11-4
     typet1 <- typeof ctx t1
     typet2 <- typeof (typet1:ctx) t2
     return typet2
-typeof ctx (Rec mp) = liftM Record$ T.mapM (typeof ctx) mp
-typeof ctx (Proj r field) = case typeof ctx r of
+typeof ctx (Rec mp) = liftM Record$ T.mapM (typeof ctx) mp -- T-Rcd 11-7
+typeof ctx (Proj r field) = case typeof ctx r of -- T-Proj 11-7
                               Right rc@(Record mp)->case Data.Map.lookup field mp of
                                                    Nothing->throwError$ FieldNotFound field rc
                                                    Just typ->return typ
                               otherwise -> throwError$ Default$ "projecting non-record term: "++show r
-typeof ctx (Case t0 mp) = do
+typeof ctx (Case t0 mp) = do -- T-Case 11-11
     (Variant t0type)<- typeof ctx t0
     (T.mapM (\(label, term)->case Data.Map.lookup label t0type of
                                         Nothing->throwError$ LabelNotFound label (Variant t0type)
                                         Just ty->typeof (ty:ctx) term
                           )$ toList mp) >>= (\xs->maybe (return (xs!!0)) (throwError)$ getFirst$ foldMap First$ zipWith (\a b->if a==b then Nothing else Just(TypeMismatch (show a) b)) xs (tail xs))
-typeof ctx (As vari@(Vari label term) ty@(Variant mp)) = case Data.Map.lookup label mp of
+typeof ctx (As vari@(Vari label term) ty@(Variant mp)) = case Data.Map.lookup label mp of -- T-Variant 11-11
                                                         Nothing->throwError$ LabelNotFound label ty
                                                         Just typ->typeof ctx term>>=(\x->if x==typ then return ty else throwError$ TypeMismatch (show typ) x)
-typeof ctx (As t ty) = do
+typeof ctx (As t ty) = do -- T-Ascribe
     tty <- typeof ctx t
     if tty==ty then return ty else throwError$ TypeMismatch (show ty) tty
 {-typeof ctx (Fold mu@(Mu x type1) t) = do
     typet <- typeof ctx t
     if typet == replaceTVar x mu type1 then return mu else throwError$ TypeMismatch "folding" mu
     -}
-typeof ctx (Fold mu@(Mu x t) term) = do
+typeof ctx (Fold mu@(Mu x t) term) = do -- T-Fld 20-1
     typet <- typeof ctx term
     return$ Main.fold mu typet 
-typeof ctx (Unfold mu@(Mu x t) term) = do
+typeof ctx (Unfold mu@(Mu x t) term) = do -- T-Unfld 20-1
     typet <- typeof ctx term
     return$ unfold mu typet 
 --    if typet == unfold mu typet then return mu else throwError$ TypeMismatch "uhyohyo" mu
