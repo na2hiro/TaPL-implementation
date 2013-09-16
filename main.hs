@@ -15,7 +15,7 @@ data Term = Tru
           | Pred Term
           | IsZero Term
           | Var Index
-          | Abs Type Term
+          | Abs VarName Type Term
           | App Term Term
           | Unit
           | As Term Type
@@ -48,6 +48,7 @@ type TypeName = String
 type FieldName = String
 type TypeVarName = String
 type Label = String
+type VarName = String
 
 instance Error MyError where
     noMsg = Default "An error has occurred"
@@ -59,28 +60,30 @@ showError (TypeMismatch expected found) = "Invalid type: expected "++ expected +
 showError (FieldNotFound field record) = "Field '"++field++"' not found on record typed "++show record
 showError (LabelNotFound label variant) = "Label '"++label++"' not found on variant typed "++show variant
 
-showTerm :: Term -> String
-showTerm Tru = "true"
-showTerm Fals = "false"
-showTerm (If a b c) = "if "++show a++" then "++show b++" else "++show c
-showTerm Zero = "zero"
-showTerm (Succ t) = "succ "++show t
-showTerm (Pred t) = "pred "++show t
-showTerm (IsZero t) = "iszero "++show t
-showTerm (Var i) = show i
-showTerm (Abs typ term) = "(\\:"++show typ++"."++show term++")"
-showTerm (App t1 t2) = "("++show t1++" "++show t2++")"
-showTerm Unit = "unit"
-showTerm (As term typ) = show term++" as "++show typ
-showTerm (Let t1 t2) = "let "++show t1++" in "++show t2
-showTerm (Rec mp) = "{"++intercalate "," (Prelude.map (\(k,v)->k++"="++show v)$ toList mp)++"}"
-showTerm (Proj t name) = show t++"."++name
-showTerm (Vari label term) = "<"++label++"="++show term++">"
-showTerm (Case term mp) = "case "++showTerm term++" of "++(intercalate " | "$ Prelude.map (\(label,t)->label++"=>"++show t)$ toList mp)
-showTerm (Fold typ term) = "fold ["++show typ++"] "++show term
-showTerm (Unfold typ term) = "unfold ["++show typ++"] "++show term
+type VarNameContext = [VarName]
 
-instance Show Term where show = showTerm
+showTerm :: VarNameContext -> Term -> String
+showTerm _ Tru = "true"
+showTerm _ Fals = "false"
+showTerm ctx (If a b c) = "if "++showTerm ctx a++" then "++showTerm ctx b++" else "++showTerm ctx c
+showTerm _ Zero = "zero"
+showTerm ctx (Succ t) = "succ "++showTerm ctx t
+showTerm ctx (Pred t) = "pred "++showTerm ctx t
+showTerm ctx (IsZero t) = "iszero "++showTerm ctx t
+showTerm ctx (Var i) = ctx!!i
+showTerm ctx (Abs varn typ term) = "(\\"++varn++":"++show typ++"."++showTerm (varn:ctx) term++")"
+showTerm ctx (App t1 t2) = "("++showTerm ctx t1++" "++showTerm ctx t2++")"
+showTerm _ Unit = "unit"
+showTerm ctx (As term typ) = showTerm ctx term++" as "++show typ
+showTerm ctx (Let t1 t2) = "let "++showTerm ctx t1++" in "++showTerm ctx t2
+showTerm ctx (Rec mp) = "{"++intercalate "," (Prelude.map (\(k,v)->k++"="++showTerm ctx v)$ toList mp)++"}"
+showTerm ctx (Proj t name) = showTerm ctx t++"."++name
+showTerm ctx (Vari label term) = "<"++label++"="++showTerm ctx term++">"
+showTerm ctx (Case term mp) = "case "++showTerm ctx term++" of "++(intercalate " | "$ Prelude.map (\(label,t)->label++"=>"++showTerm ctx t)$ toList mp)
+showTerm ctx (Fold typ term) = "fold ["++show typ++"] "++showTerm ctx term
+showTerm ctx (Unfold typ term) = "unfold ["++show typ++"] "++showTerm ctx term
+
+instance Show Term where show = showTerm []
 
 showType :: Type->String
 showType Bool = "Bool"
@@ -134,7 +137,7 @@ eval1 ctx (App t1 t2) | isJust t1' = t1' >>= \t1'->Just$ App t1' t2 -- E-App1 5-
                       | isJust t2' = t2' >>= \t2'->Just$ App t1 t2' -- E-App2 5-3
   where t1'=eval1 ctx t1
         t2'=eval1 ctx t2
-eval1 ctx (App (Abs typ x) t2) = Just$ termSubstTop t2 x -- E-AppAbs 5-3
+eval1 ctx (App (Abs varn typ x) t2) = Just$ termSubstTop t2 x -- E-AppAbs 5-3
 eval1 ctx (As t ty) = case t of
                         Vari label term -> eval1 ctx term >>= (\term'->return$As (Vari label term') ty)
                         otherwise -> maybe (return t) (\t'->return$ As t' ty)$ eval1 ctx t -- E-Ascribe 11-3
@@ -168,7 +171,7 @@ termShift :: Index->Term->Term
 termShift d t = shift 0 t
   where shift c (Var k) | k<c = Var k
                         | otherwise = Var (k+d)
-        shift c (Abs typ t) = Abs typ$ shift (c+1) t
+        shift c (Abs varn typ t) = Abs varn typ$ shift (c+1) t
         shift c (App t1 t2) = (App (shift c t1) (shift c t2))
         shift c (If t1 t2 t3) = (If (shift c t1) (shift c t2) (shift c t3))
         shift c t = t
@@ -181,7 +184,7 @@ termSubst j s (Pred t) = Pred (termSubst j s t)
 termSubst j s (IsZero t) = IsZero (termSubst j s t)
 termSubst j s (Var k) | k==j = s
                       | otherwise = Var k
-termSubst j s (Abs typ t) = Abs typ$ termSubst (j+1) (termShift 1 s) t
+termSubst j s (Abs varn typ t) = Abs varn typ$ termSubst (j+1) (termShift 1 s) t
 termSubst j s (App t1 t2) = App (termSubst j s t1) (termSubst j s t2)
 termSubst j s (As t typ) = As (termSubst j s t) typ
 termSubst j s (Let term t) = Let (termSubst j s term)$ termSubst (j+1) (termShift 1 s) t
@@ -220,7 +223,7 @@ typeof ctx (IsZero n) = do -- T-IsZero 8-2
     typet <- typeof ctx n
     if typet==Nat then return Bool else throwError$ TypeMismatch (show Nat) typet
 typeof ctx (Var x) = return (ctx!!x) -- T-Var 9-1
-typeof ctx (Abs typevar t) = do -- T-Abs 9-1
+typeof ctx (Abs varn typevar t) = do -- T-Abs 9-1
     typet <- typeof (typevar:ctx) t
     return$ Arr typevar typet
 typeof ctx (App t1 t2) = do -- T-App 9-1
@@ -281,32 +284,32 @@ fold mu@(Mu varname typ) body = Mu varname $replace mu (TVar varname) body
 unfold::Type->Type->Type
 unfold mu@(Mu varname typ) (Mu varname2 body) = replace (TVar varname) mu body
 
-fixN typ = (Abs (Arr typ typ)
-            (App (Abs (Mu "A" (Arr (TVar "A") typ))
+fixN typ = (Abs "f" (Arr typ typ)
+            (App (Abs "x" (Mu "A" (Arr (TVar "A") typ))
                       (Var 1 `App` (Unfold (Mu "A" (Arr (TVar "A") typ)) (Var 0) `App` Var 0)))
                  (Fold (Mu "A" (Arr (TVar "A") typ))
-                       (Abs (Mu "A" (Arr (TVar "A") typ))
+                       (Abs "x" (Mu "A" (Arr (TVar "A") typ))
                             (Var 1 `App` (Unfold (Mu "A" (Arr (TVar "A") typ)) (Var 0) `App` Var 0))))))
-fixV = (Abs (Arr (TVar "T") (TVar "T"))
-            (App (Abs (Mu "A" (Arr (TVar "A") (TVar "T")))
-                      (Var 1 `App` Abs (Mu "A" (TVar "A")) (Var 1 `App` Unfold (Mu "A" (Arr (TVar "A") (TVar "T"))) (Var 1) `App` Var 0)))
+fixV = (Abs "f" (Arr (TVar "T") (TVar "T"))
+            (App (Abs "x" (Mu "A" (Arr (TVar "A") (TVar "T")))
+                      (Var 1 `App` Abs "y" (Mu "A" (TVar "A")) (Var 1 `App` Unfold (Mu "A" (Arr (TVar "A") (TVar "T"))) (Var 1) `App` Var 0)))
                  (Fold (Mu "A" (Arr (TVar "A") (TVar "T")))
-                       (Abs (Mu "A" (Arr (TVar "A") (TVar "T")))
-                            (Var 1 `App` (Abs (Mu "A" (TVar "A")) (Var 1 `App` Unfold (Mu "A" (Arr (TVar "A") (TVar "T"))) (Var 1) `App` Var 0)))))))
+                       (Abs "x" (Mu "A" (Arr (TVar "A") (TVar "T")))
+                            (Var 1 `App` (Abs "y" (Mu "A" (TVar "A")) (Var 1 `App` Unfold (Mu "A" (Arr (TVar "A") (TVar "T"))) (Var 1) `App` Var 0)))))))
 
 hungryt = Mu "A" (Arr Nat (TVar "A"))
-hungryf = (Abs (Arr Nat hungryt)
-               (Abs Nat (Fold hungryt (Var 1))))
+hungryf = (Abs "f" (Arr Nat hungryt)
+               (Abs "n" Nat (Fold hungryt (Var 1))))
 
 hungry = fixN (Arr Nat hungryt) `App` hungryf
 
 natList = Mu "X"$ Variant$ insert "nil" TUnit$ insert "cons" (Record$ insert "hd" Nat$ insert "tl" (TVar "X") empty) empty
 nlBody = Variant$ insert "nil" TUnit$ insert "cons" (Record$ insert "hd" Nat$ insert "tl" natList empty) empty
 nil = Fold natList (Vari "nil" Unit `As` nlBody)
-cons = (Abs Nat (Abs natList (Fold natList (Vari "cons" (Rec$ insert "hd" (Var 1)$ insert "tl" (Var 0) empty) `As` nlBody))))
-isnil = Abs natList (Case (Unfold natList (Var 0)) (insert "nil" Tru$ insert "cons" Fals empty))
-hd = Abs natList$ Case (Unfold natList (Var 0))$ insert "nil" Zero$ insert "cons" (Proj (Var 0) "hd") empty
-tl = Abs natList$ Case (Unfold natList (Var 0))$ insert "nil" (Var 1)$ insert "cons" (Proj (Var 0) "tl") empty
+cons = (Abs "n" Nat (Abs "l" natList (Fold natList (Vari "cons" (Rec$ insert "hd" (Var 1)$ insert "tl" (Var 0) empty) `As` nlBody))))
+isnil = Abs "l" natList (Case (Unfold natList (Var 0)) (insert "nil" Tru$ insert "cons" Fals empty))
+hd = Abs "l" natList$ Case (Unfold natList (Var 0))$ insert "nil" Zero$ insert "cons" (Proj (Var 0) "hd") empty
+tl = Abs "l" natList$ Case (Unfold natList (Var 0))$ insert "nil" (Var 1)$ insert "cons" (Proj (Var 0) "tl") empty
 
-inc=(Abs (Variant$ insert "just" Nat$ insert "nothing" TUnit empty) (Case (Var 0) $insert "just" (Succ (Var 0))$ insert "nothing" Zero empty))
+inc=(Abs "x" (Variant$ insert "just" Nat$ insert "nothing" TUnit empty) (Case (Var 0) $insert "just" (Succ (Var 0))$ insert "nothing" Zero empty))
 just1 = Vari "just" (Succ Zero) `As` Variant (insert "just" Nat$ insert "nothing" TUnit empty)
